@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 
+	"github.com/adyanth/cloudflare-operator/internal/clients/cf"
+
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -26,7 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
-	networkingv1alpha1 "github.com/adyanth/cloudflare-operator/api/v1alpha1"
+	networkingv1alpha2 "github.com/adyanth/cloudflare-operator/api/v1alpha2"
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/client-go/tools/record"
@@ -43,7 +45,7 @@ type TunnelReconciler struct {
 	ctx         context.Context
 	log         logr.Logger
 	tunnel      Tunnel
-	cfAPI       *CloudflareAPI
+	cfAPI       *cf.API
 	cfSecret    *corev1.Secret
 	tunnelCreds string
 }
@@ -72,11 +74,11 @@ func (r *TunnelReconciler) GetTunnel() Tunnel {
 	return r.tunnel
 }
 
-func (r *TunnelReconciler) GetCfAPI() *CloudflareAPI {
+func (r *TunnelReconciler) GetCfAPI() *cf.API {
 	return r.cfAPI
 }
 
-func (r *TunnelReconciler) SetCfAPI(in *CloudflareAPI) {
+func (r *TunnelReconciler) SetCfAPI(in *cf.API) {
 	r.cfAPI = in
 }
 
@@ -91,6 +93,16 @@ func (r *TunnelReconciler) GetTunnelCreds() string {
 func (r *TunnelReconciler) SetTunnelCreds(in string) {
 	r.tunnelCreds = in
 }
+
+func (r *TunnelReconciler) GetReconciledObject() client.Object {
+	return r.GetTunnel().GetObject()
+}
+
+func (r *TunnelReconciler) GetReconcilerName() string {
+	return "Tunnel"
+}
+
+var _ GenericTunnelReconciler = &TunnelReconciler{}
 
 func (r *TunnelReconciler) initStruct(ctx context.Context, tunnel Tunnel) error {
 	r.ctx = ctx
@@ -107,13 +119,13 @@ func (r *TunnelReconciler) initStruct(ctx context.Context, tunnel Tunnel) error 
 	return nil
 }
 
-//+kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=tunnels,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=tunnels/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=tunnels/finalizers,verbs=update
-//+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=tunnels,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=tunnels/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=tunnels/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -124,7 +136,7 @@ func (r *TunnelReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	r.log = ctrllog.FromContext(ctx)
 
 	// Lookup the Tunnel resource
-	tunnel := &networkingv1alpha1.Tunnel{}
+	tunnel := &networkingv1alpha2.Tunnel{}
 	if err := r.Get(ctx, req.NamespacedName, tunnel); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Tunnel object not found, could have been deleted after reconcile request.
@@ -151,7 +163,7 @@ func (r *TunnelReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	// Create necessary resources
-	if res, ok, err := createManagedResources(r); !ok {
+	if res, err := createManagedResources(r); err != nil {
 		return res, err
 	}
 
@@ -162,7 +174,7 @@ func (r *TunnelReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 func (r *TunnelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Recorder = mgr.GetEventRecorderFor("cloudflare-operator")
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&networkingv1alpha1.Tunnel{}).
+		For(&networkingv1alpha2.Tunnel{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Secret{}).
 		Owns(&appsv1.Deployment{}).

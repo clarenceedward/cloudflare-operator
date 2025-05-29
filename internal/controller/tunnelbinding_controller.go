@@ -24,7 +24,10 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/adyanth/cloudflare-operator/internal/clients/cf"
+
 	networkingv1alpha1 "github.com/adyanth/cloudflare-operator/api/v1alpha1"
+	networkingv1alpha2 "github.com/adyanth/cloudflare-operator/api/v1alpha2"
 	"github.com/go-logr/logr"
 	yaml "gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
@@ -55,14 +58,14 @@ type TunnelBindingReconciler struct {
 	binding        *networkingv1alpha1.TunnelBinding
 	configmap      *corev1.ConfigMap
 	fallbackTarget string
-	cfAPI          *CloudflareAPI
+	cfAPI          *cf.API
 }
 
 // labelsForBinding returns the labels for selecting the Bindings served by a Tunnel.
-func (r TunnelBindingReconciler) labelsForBinding() map[string]string {
+func labelsForBinding(binding networkingv1alpha1.TunnelBinding) map[string]string {
 	labels := map[string]string{
-		tunnelNameLabel: r.binding.TunnelRef.Name,
-		tunnelKindLabel: r.binding.Kind,
+		tunnelNameLabel: binding.TunnelRef.Name,
+		tunnelKindLabel: binding.Kind,
 	}
 
 	return labels
@@ -79,7 +82,7 @@ func (r *TunnelBindingReconciler) initStruct(ctx context.Context, tunnelBinding 
 	switch strings.ToLower(r.binding.TunnelRef.Kind) {
 	case "clustertunnel":
 		namespacedName = apitypes.NamespacedName{Name: r.binding.TunnelRef.Name, Namespace: r.Namespace}
-		clusterTunnel := &networkingv1alpha1.ClusterTunnel{}
+		clusterTunnel := &networkingv1alpha2.ClusterTunnel{}
 		if err := r.Get(r.ctx, namespacedName, clusterTunnel); err != nil {
 			r.log.Error(err, "Failed to get ClusterTunnel", "namespacedName", namespacedName)
 			r.Recorder.Event(tunnelBinding, corev1.EventTypeWarning, "ErrTunnel", "Error getting ClusterTunnel")
@@ -95,7 +98,7 @@ func (r *TunnelBindingReconciler) initStruct(ctx context.Context, tunnelBinding 
 		}
 	case "tunnel":
 		namespacedName = apitypes.NamespacedName{Name: r.binding.TunnelRef.Name, Namespace: r.binding.Namespace}
-		tunnel := &networkingv1alpha1.Tunnel{}
+		tunnel := &networkingv1alpha2.Tunnel{}
 		if err := r.Get(r.ctx, namespacedName, tunnel); err != nil {
 			r.log.Error(err, "Failed to get Tunnel", "namespacedName", namespacedName)
 			r.Recorder.Event(tunnelBinding, corev1.EventTypeWarning, "ErrTunnel", "Error getting Tunnel")
@@ -126,17 +129,17 @@ func (r *TunnelBindingReconciler) initStruct(ctx context.Context, tunnelBinding 
 	return nil
 }
 
-//+kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=tunnelbindings,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=tunnelbindings/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=tunnelbindings/finalizers,verbs=update
-//+kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=tunnels,verbs=get
-//+kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=tunnels/status,verbs=get
-//+kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=clustertunnels,verbs=get
-//+kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=clustertunnels/status,verbs=get
-//+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;update;patch
-//+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;update;patch
-//+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch
-//+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=tunnelbindings,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=tunnelbindings/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=tunnelbindings/finalizers,verbs=update
+// +kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=tunnels,verbs=get
+// +kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=tunnels/status,verbs=get
+// +kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=clustertunnels,verbs=get
+// +kubebuilder:rbac:groups=networking.cfargotunnel.com,resources=clustertunnels/status,verbs=get
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;update;patch
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -253,7 +256,7 @@ func (r *TunnelBindingReconciler) creationLogic() error {
 	if r.binding.Labels == nil {
 		r.binding.Labels = make(map[string]string)
 	}
-	for k, v := range r.labelsForBinding() {
+	for k, v := range labelsForBinding(*r.binding) {
 		r.binding.Labels[k] = v
 	}
 
@@ -489,24 +492,24 @@ func (r *TunnelBindingReconciler) getServiceProto(tunnelProto string, validProto
 	return serviceProto
 }
 
-func (r *TunnelBindingReconciler) getConfigMapConfiguration() (*Configuration, error) {
+func (r *TunnelBindingReconciler) getConfigMapConfiguration() (*cf.Configuration, error) {
 	// Read ConfigMap YAML
 	configStr, ok := r.configmap.Data[configmapKey]
 	if !ok {
 		err := fmt.Errorf("unable to find key `%s` in ConfigMap", configmapKey)
 		r.log.Error(err, "unable to find key in ConfigMap", "key", configmapKey)
-		return &Configuration{}, err
+		return &cf.Configuration{}, err
 	}
 
-	config := &Configuration{}
+	config := &cf.Configuration{}
 	if err := yaml.Unmarshal([]byte(configStr), config); err != nil {
 		r.log.Error(err, "unable to read config as YAML")
-		return &Configuration{}, err
+		return &cf.Configuration{}, err
 	}
 	return config, nil
 }
 
-func (r *TunnelBindingReconciler) setConfigMapConfiguration(config *Configuration) error {
+func (r *TunnelBindingReconciler) setConfigMapConfiguration(config *cf.Configuration) error {
 	// Push updated changes
 	var configStr string
 	if configBytes, err := yaml.Marshal(config); err == nil {
@@ -532,10 +535,10 @@ func (r *TunnelBindingReconciler) setConfigMapConfiguration(config *Configuratio
 	// Restart pods
 	r.Recorder.Event(r.binding, corev1.EventTypeNormal, "ApplyingConfig", "Applying ConfigMap to Deployment")
 	r.Recorder.Event(cfDeployment, corev1.EventTypeNormal, "ApplyingConfig", "Applying ConfigMap to Deployment")
-	if cfDeployment.Spec.Template.Annotations == nil {
-		cfDeployment.Spec.Template.Annotations = map[string]string{}
+	if cfDeployment.Annotations == nil {
+		cfDeployment.Annotations = map[string]string{}
 	}
-	cfDeployment.Spec.Template.Annotations[tunnelConfigChecksum] = hex.EncodeToString(hash[:])
+	cfDeployment.Annotations[tunnelConfigChecksum] = hex.EncodeToString(hash[:])
 	if err := r.Update(r.ctx, cfDeployment); err != nil {
 		r.log.Error(err, "Failed to update Deployment for restart")
 		r.Recorder.Event(r.binding, corev1.EventTypeWarning, "FailedApplyingConfig", "Failed to apply ConfigMap to Deployment")
@@ -549,7 +552,7 @@ func (r *TunnelBindingReconciler) setConfigMapConfiguration(config *Configuratio
 }
 
 func (r *TunnelBindingReconciler) configureCloudflareDaemon() error {
-	var config *Configuration
+	var config *cf.Configuration
 	var err error
 
 	if config, err = r.getConfigMapConfiguration(); err != nil {
@@ -565,7 +568,7 @@ func (r *TunnelBindingReconciler) configureCloudflareDaemon() error {
 
 	// Total number of ingresses is the number of services + 1 for the catchall ingress
 	// Set to 16 initially
-	finalIngresses := make([]UnvalidatedIngressRule, 0, 16)
+	finalIngresses := make([]cf.UnvalidatedIngressRule, 0, 16)
 	for _, binding := range bindings {
 		for i, subject := range binding.Subjects {
 			targetService := ""
@@ -574,7 +577,7 @@ func (r *TunnelBindingReconciler) configureCloudflareDaemon() error {
 			} else {
 				targetService = binding.Status.Services[i].Target
 			}
-			originRequest := OriginRequestConfig{}
+			originRequest := cf.OriginRequestConfig{}
 			originRequest.NoTLSVerify = &subject.Spec.NoTlsVerify
 			originRequest.Http2Origin = &subject.Spec.Http2Origin
 			originRequest.ProxyAddress = &subject.Spec.ProxyAddress
@@ -585,7 +588,7 @@ func (r *TunnelBindingReconciler) configureCloudflareDaemon() error {
 				originRequest.CAPool = &caPath
 			}
 
-			finalIngresses = append(finalIngresses, UnvalidatedIngressRule{
+			finalIngresses = append(finalIngresses, cf.UnvalidatedIngressRule{
 				Hostname:      binding.Status.Services[i].Hostname,
 				Service:       targetService,
 				Path:          subject.Spec.Path,
@@ -595,7 +598,7 @@ func (r *TunnelBindingReconciler) configureCloudflareDaemon() error {
 	}
 
 	// Catchall ingress
-	finalIngresses = append(finalIngresses, UnvalidatedIngressRule{
+	finalIngresses = append(finalIngresses, cf.UnvalidatedIngressRule{
 		Service: r.fallbackTarget,
 	})
 
